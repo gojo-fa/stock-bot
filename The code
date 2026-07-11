@@ -1,0 +1,234 @@
+import os
+import json
+import time
+import random
+import asyncio
+import threading
+from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from playwright.async_api import async_playwright
+from fake_useragent import UserAgent
+import telegram
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+# Read from Environment Variables for Cloud/Render
+PRODUCT_URL = os.getenv(
+    "PRODUCT_URL",
+    "https://www.example.com/product/12345"
+)
+STOCK_SELECTOR = os.getenv(
+    "STOCK_SELECTOR",
+    ".product-stock-status"
+)
+STOCK_KEYWORD = os.getenv(
+    "STOCK_KEYWORD",
+    "In Stock"
+)
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    "YOUR_BOT_TOKEN_HERE"
+)
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    "YOUR_CHAT_ID_HERE"
+)
+
+# State file to track if we already notified
+STATE_FILE = "bot_state.json"
+
+
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "r") as f:
+            return json.load(f)
+    return {
+        "notified": False,
+        "last_checked": None,
+        "consecutive_errors": 0
+    }
+
+
+def save_state(state):
+    with open(STATE_FILE, "w") as f:
+        json.dump(state, f)
+
+
+async def send_telegram_alert(msg):
+    bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+    try:
+        await bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=msg,
+            parse_mode="HTML"
+        )
+        print(f"[TG] Alert sent: {msg}")
+    except Exception as e:
+        print(f"[TG] Error: {e}")
+
+
+def get_random_user_agent():
+    ua = UserAgent()
+    return ua.random
+
+
+# ============================================================
+# CORE BOT LOGIC
+# ============================================================
+
+async def check_stock():
+    state = load_state()
+    ua = get_random_user_agent()
+    
+    print(
+        f"[{datetime.now().strftime('%H:%M:%S')}] "
+        f"Checking stock... (UA: {ua.browser})"
+    )
+
+    async with async_playwright() as p:
+        # Launch headless browser
+        browser = await p.chromium.launch(headless=True)
+        
+        # Create context with stealth settings
+        context = await browser.new_context(
+            user_agent=ua,
+            viewport={"width": 1920, "height": 1080},
+            locale="en-US",
+            timezone_id="America/New_York"
+        )
+        
+        # Add stealth script to hide webdriver flag
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['en-US', 'en']
+            });
+        """)
+        
+        page = await context.new_page()
+        
+        try:
+            # Navigate with wait until network is idle
+            await page.goto(
+                PRODUCT_URL,
+                wait_until="networkidle",
+                timeout=20000
+            )
+            
+            # Wait a random short time to mimic human reading
+            await page.wait_for_timeout(
+                random.uniform(1000, 3000)
+            )
+            
+            # Check if selector exists
+            element = await page.query_selector(STOCK_SELECTOR)
+            
+            if element:
+                text = await element.text_content()
+                text = text.strip()
+                print(f"  Found text: '{text}'")
+                
+                if STOCK_KEYWORD.lower() in text.lower():
+                    print("✅ STOCK DETECTED!")
+                    if not state["notified"]:
+                        msg = f"""
+🟢 <b>STOCK ALERT!</b>
+
+Product: {PRODUCT_URL}
+Status: {text}
+Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+<b>Click to buy:</b>
+{PRODUCT_URL}
+"""
+                        await send_telegram_alert(msg)
+                        state["notified"] = True
+                        state["consecutive_errors"] = 0
+                        save_state(state)
+                        return True
+                    else:
+                        print("  Already notified.")
+                else:
+                    print("  Out of stock.")
+                    state["consecutive_errors"] = 0
+            else:
+                print(f"  Selector '{STOCK_SELECTOR}' not found.")
+                state["consecutive_errors"] += 1
+                
+        except Exception as e:
+            print(f"  Error: {e}")
+            state["consecutive_errors"] += 1
+        finally:
+            await browser.close()
+            save_state(state)
+            return False
+
+
+async def main():
+    print(f"🚀 Bot Started.")
+    print(f"   URL: {PRODUCT_URL}")
+    print(f"   Interval: {CHECK_INTERVAL}s")
+    print(f"   Keyword: '{STOCK_KEYWORD}'")
+    print(f"   Press Ctrl+C to stop\n")
+    
+    state = load_state()
+    
+    # Optional: Reset notified status on restart
+    # state["notified"] = False
+    save_state(state)
+
+    while True:
+        is_in_stock = await check_stock()
+        
+        # If you want the bot to stop after notifying:
+        if is_in_stock and state["notified"]:
+            print("✅ Notified. Bot stopping.")
+            break
+            
+        # Dynamic delay with jitter
+        jitter = random.uniform(-2, 2)
+        delay = max(1, CHECK_INTERVAL + jitter)
+        print(f"   Next check in {delay:.1f}s")
+        await asyncio.sleep(delay)
+
+
+# ============================================================
+# HTTP SERVER FOR RENDER UPTIME
+# ============================================================
+
+class BotHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
+        self.wfile.write(b"<h1>🟢 Stock Bot is Alive!</h1>")
+    
+    # Suppress console log noise
+    def log_message(self, format, *args):
+        pass
+
+
+def run_http_server(port=1000):
+    server_address = ('0.0.0.0', port)
+    httpd = HTTPServer(server_address, BotHandler)
+    httpd.serve_forever()
+
+
+if __name__ == "__main__":
+    # Start HTTP server in background for Render/UptimeRobot
+    threading.Thread(
+        target=run_http_server,
+        daemon=True
+    ).start()
+    
+    # Run the async bot
+    asyncio.run(main())
