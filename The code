@@ -16,15 +16,15 @@ import telegram
 # ============================================================
 # Read from Environment Variables for Cloud/Render
 PRODUCT_URL = os.getenv(
-    "PRODUCT_URL",
+    "https://www.pokemoncenter.com/en-gb/product/10-10315-108/pokemon-tcg-mega-evolution-ascended-heroes-pokemon-center-elite-trainer-box",
     "https://www.example.com/product/12345"
 )
 STOCK_SELECTOR = os.getenv(
-    "STOCK_SELECTOR",
+    ".product-availability__status",
     ".product-stock-status"
 )
 STOCK_KEYWORD = os.getenv(
-    "STOCK_KEYWORD",
+    "In Stock",
     "In Stock"
 )
 CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
