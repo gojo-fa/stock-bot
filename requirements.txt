@@ -1,0 +1,6 @@
+```text
+playwright==1.36.0
+fake-useragent==1.0.3
+python-telegram-bot==20.1
+requests==2.31.0
+```
